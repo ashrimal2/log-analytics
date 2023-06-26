@@ -10,7 +10,9 @@ df = spark \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
     .option("subscribe", "log_topic") \
-    .option("startingOffsets", "earliest") \
+    .option("startingOffsets", "latest") \
+    .option("kafka.group.id", "log_topic_consumer1") \
+    .option("failOnDataLoss", "false") \
     .load() \
     .selectExpr("CAST(value AS STRING)")
 
@@ -37,8 +39,8 @@ query = df_parsed \
     .trigger(processingTime='10 seconds') \
     .outputMode("append") \
     .format("parquet") \
-    .option("path", "hdfs://localhost:9000/user/aditshrimal/msds/summer23/de/assignments/log-analytics/output") \
-    .option("checkpointLocation", "hdfs://localhost:9000/user/aditshrimal/msds/summer23/de/assignments/log-analytics/checkpoint") \
+    .option("path", "hdfs://localhost:9000/user/aditshrimal/msds/summer23/de/assignments/log-analytics/output_files") \
+    .option("checkpointLocation", "hdfs://localhost:9000/user/aditshrimal/msds/summer23/de/assignments/log-analytics/checkpoint_files") \
     .start()
 
 query.awaitTermination()
