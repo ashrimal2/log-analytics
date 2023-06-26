@@ -1,1 +1,9 @@
+# 2 GB File
 /dataset/2GBFIle.log
+
+# Pycache
+__pycache__/
+
+# Starting with .
+.trunk/
+.pytest_cache/
