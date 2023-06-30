@@ -40,7 +40,7 @@ This project involves analyzing server logs using big data tools like Apache Kaf
 
 4. Run the Kafka log producer (ensure you're in the `section-b/kafka` directory):
     ```
-    python publisher.py
+    python publisher.py --file_path /path/to/your/file.log --batch_size 500 --topic_name your_topic
     ```
 
 5. Submit the Spark Streaming job (ensure you're in the `section-b/spark-streaming` directory):

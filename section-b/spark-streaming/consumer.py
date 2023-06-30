@@ -1,5 +1,14 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import regexp_extract
+import configparser
+
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+kafka_bootstrap_servers = config['DEFAULT']['KafkaBootstrapServers']
+topic_name = config['DEFAULT']['TopicName']
+hdfs_output_path = config['DEFAULT']['HDFSOutputPath']
+hdfs_checkpoint_path = config['DEFAULT']['HDFSCheckpointPath']
 
 # 1. Create a SparkSession
 spark = SparkSession.builder.appName("KafkaToParquet").getOrCreate()
@@ -8,10 +17,10 @@ spark = SparkSession.builder.appName("KafkaToParquet").getOrCreate()
 df = spark \
     .readStream \
     .format("kafka") \
-    .option("kafka.bootstrap.servers", "localhost:9092") \
-    .option("subscribe", "log_topic") \
+    .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
+    .option("subscribe", topic_name) \
     .option("startingOffsets", "latest") \
-    .option("kafka.group.id", "log_topic_consumer1") \
+    .option("kafka.group.id", "{}_consumer1".format(topic_name)) \
     .option("failOnDataLoss", "false") \
     .load() \
     .selectExpr("CAST(value AS STRING)")
@@ -39,8 +48,8 @@ query = df_parsed \
     .trigger(processingTime='10 seconds') \
     .outputMode("append") \
     .format("parquet") \
-    .option("path", "hdfs://localhost:9000/user/aditshrimal/msds/summer23/de/assignments/log-analytics/output_files") \
-    .option("checkpointLocation", "hdfs://localhost:9000/user/aditshrimal/msds/summer23/de/assignments/log-analytics/checkpoint_files") \
+    .option("path", hdfs_output_path) \
+    .option("checkpointLocation", hdfs_checkpoint_path) \
     .start()
 
 query.awaitTermination()
