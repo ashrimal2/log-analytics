@@ -4,6 +4,11 @@ from pyspark.sql.window import Window
 from pyspark.sql import SparkSession
 import configparser
 
+# Constants
+WINDOW_SIZE = "3 hours"
+OUTPUT_FORMAT = "parquet"
+TRIGGER_PROCESSING_TIME = '10 seconds'
+
 config = configparser.ConfigParser()
 config.read('/Users/aditshrimal/Desktop/MSDS/summer23/assignments/log-analytics/section-b/spark-streaming/config.ini')
 
@@ -13,7 +18,13 @@ hdfs_output_path = config['DEFAULT']['HDFSOutputPath']
 hdfs_checkpoint_path = config['DEFAULT']['HDFSCheckpointPath']
 
 # 1. Create a SparkSession
-spark = SparkSession.builder.appName("KafkaToParquet").getOrCreate()
+spark = SparkSession.builder \
+    .appName("KafkaToParquet") \
+    .config("spark.streaming.stopGracefullyOnShutdown", "true") \
+    .config("spark.sql.shuffle.partitions", 2) \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("WARN")
 
 # 2. Read from Kafka topic
 df = spark \
@@ -21,17 +32,14 @@ df = spark \
     .format("kafka") \
     .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
     .option("subscribe", topic_name) \
-    .option("startingOffsets", "latest") \
-    .option("kafka.group.id", "{}_consumer1".format(topic_name)) \
-    .option("failOnDataLoss", "false") \
-    .load() \
-    .selectExpr("CAST(value AS STRING)")
+    .option("startingOffsets", "earliest") \
+    .load()
 
 # 3. Parse the log data into separate columns
 df_parsed = df.select(
     regexp_extract("value", r"^([^\s]+\s)", 1).alias("host"),
     regexp_extract(
-        "value", r"^.*\[(\d\d/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -\d{4})]", 1
+        "value", r"^.*\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})]", 1
     ).alias("timestamp"),
     regexp_extract("value", r'^.*"\s*(\w+)\s+([^\s]+)\s+([^\s]+)"', 1).alias("method"),
     regexp_extract("value", r'^.*"\s*(\w+)\s+([^\s]+)\s+([^\s]+)"', 2).alias(
@@ -45,160 +53,52 @@ df_parsed = df.select(
 )
 
 # Timestamp conversion
-timestamp_format = "dd/MMM/yyyy:HH:mm:ss Z"
-df_parsed = df_parsed.withColumn("timestamp", 
+timestamp_format = "yyyy-MM-dd HH:mm:ss"
+df_parsed = df_parsed.withColumn("timestamp",
                                  to_timestamp(unix_timestamp(df_parsed["timestamp"], timestamp_format).cast("timestamp")))
 
-# Applying watermark
-df_parsed = df_parsed.withWatermark("timestamp", "1 hour")
+# Add a watermark
+df_parsed = df_parsed.withWatermark("timestamp", "1 day")
 
-# 4. Creating EDA parquet files for streaming data
-# 4.1. Content Size Analysis
-content_analysis = df_parsed\
-        .describe(["content_size"])\
-        .writeStream \
-        .trigger(processingTime='10 seconds') \
+# Function to write a DataFrame to a stream
+def write_to_stream(df, output_path, checkpoint_path):
+    df.writeStream \
         .outputMode("append") \
-        .format("parquet") \
-        .option("path", hdfs_output_path+"/content_size") \
-        .option("checkpointLocation", hdfs_checkpoint_path) \
+        .format(OUTPUT_FORMAT) \
+        .option("path", hdfs_output_path + output_path) \
+        .option("checkpointLocation", hdfs_checkpoint_path + checkpoint_path) \
+        .trigger(processingTime=TRIGGER_PROCESSING_TIME) \
         .start()
 
-content_analysis.awaitTermination()
+# 4. Creating EDA parquet files for streaming data
+# 4.1. Number of requests per host
+requests_per_host = df_parsed.groupBy("host", F.window("timestamp", WINDOW_SIZE)).count()
+requests_per_host = requests_per_host.select("host", "window.start", "window.end", "count")
+write_to_stream(requests_per_host, "/requests", "/requests")
 
-# 4.2. HTTP Status Analysis with watermarking
-http_analysis = df_parsed \
-    .groupBy("status") \
-    .count() \
-    .writeStream \
-    .trigger(processingTime='10 seconds') \
-    .outputMode("append") \
-    .format("parquet") \
-    .option("path", hdfs_output_path+"/http_status") \
-    .option("checkpointLocation", hdfs_checkpoint_path) \
-    .start()
+# 4.2. Number of requests per endpoint
+requests_per_endpoint = df_parsed.groupBy("endpoint", F.window("timestamp", WINDOW_SIZE)).count()
+requests_per_endpoint = requests_per_endpoint.select("endpoint", "window.start", "window.end", "count")
+write_to_stream(requests_per_endpoint, "/endpoints", "/endpoints")
 
-http_analysis.awaitTermination()
+# 4.3. Number of requests per status
+requests_per_status = df_parsed.groupBy("status", F.window("timestamp", WINDOW_SIZE)).count()
+requests_per_status = requests_per_status.select("status", "window.start", "window.end", "count")
+write_to_stream(requests_per_status, "/status", "/status")
 
-# #4.3 Analysing Frequent hosts
-# freq_host_analysis = df_parsed\
-#         .groupBy("host").count()\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"/freq_host_analysis") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
+# 4.4. Number of requests per content size
+requests_per_content_size = df_parsed.groupBy("content_size", F.window("timestamp", WINDOW_SIZE)).count()
+requests_per_content_size = requests_per_content_size.select("content_size", "window.start", "window.end", "count")
+write_to_stream(requests_per_content_size, "/content_size", "/content_size")
 
-# # freq_host_analysis.awaitTermination()
+# 4.5. Number of requests per protocol
+requests_per_protocol = df_parsed.groupBy("protocol", F.window("timestamp", WINDOW_SIZE)).count()
+requests_per_protocol = requests_per_protocol.select("protocol", "window.start", "window.end", "count")
+write_to_stream(requests_per_protocol, "/protocol", "/protocol")
 
-# #4.4 Top 20 Frquent Endpoints
-# freq_endpoints = df_parsed\
-#         .groupBy("endpoint").count()\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"/freq_endpoints") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
+# 4.6. Number of requests per method
+requests_per_method = df_parsed.groupBy("method", F.window("timestamp", WINDOW_SIZE)).count()
+requests_per_method = requests_per_method.select("method", "window.start", "window.end", "count")
+write_to_stream(requests_per_method, "/method", "/method")
 
-# # freq_endpoints.awaitTermination()
-
-# #4.5 Top 10 Error Endpoints
-# freq_error_endpoints = df_parsed\
-#         .filter(df_parsed["status"] != 200)\
-#         .groupBy("endpoint").count()\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"/freq_error_endpoints") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
-
-# # freq_error_endpoints.awaitTermination()
-
-# #4.6 Average Daily requests per host
-# host_day_distinct_df = df_parsed.select(df_parsed.host, F.dayofmonth("timestamp").alias("day")).dropDuplicates()
-# daily_hosts_df = (
-#     host_day_distinct_df.groupBy("day")
-#     .count()
-#     .select(col("day"), col("count").alias("total_hosts"))
-# )
-# total_daily_reqests_df = (
-#     df_parsed.select(F.dayofmonth("timestamp").alias("day"))
-#     .groupBy("day")
-#     .count()
-#     .select(col("day"), col("count").alias("total_reqs"))
-# )
-# avg_daily_reqests_per_host = total_daily_reqests_df.join(daily_hosts_df, "day")\
-#         .withColumn(
-#             "avg_reqs", col("total_reqs") / col("total_hosts")
-#         )\
-#         .sort("day")\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"/avg_daily_req_per_host") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
-
-# # avg_daily_reqests_per_host.awaitTermination()
-
-# #4.7 404 Errors per day
-# errors_per_day = df_parsed.filter(df_parsed["status"] == 404)\
-#         .groupBy(F.dayofmonth("timestamp").alias("day"))\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"errors_per_day") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
-
-# # errors_per_day.awaitTermination()
-
-# #4.8 Frequently accessed endpoints per day of the week
-# window = Window.partitionBy("day_of_week").orderBy(F.desc("count"))
-# freq_endpoint_day_of_week = df_parsed\
-#         .withColumn("day_of_week", F.date_format("timestamp", "E"))\
-#         .groupBy("day_of_week", "endpoint").count()\
-#         .withColumn("rn", F.row_number().over(window)).filter(
-#             F.col("rn") == 1
-#         )\
-#         .select("day_of_week", "endpoint", "count")\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"/freq_endpoints_day_of_week") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
-
-# # freq_endpoint_day_of_week.awaitTermination()
-
-# #4.9 Total number of 404 status code generated each day of the week.
-# total_error_status = df_parsed.filter(F.col("status") == 404)\
-#         .groupBy("day_of_week").count()\
-#         .writeStream \
-#         .trigger(processingTime='10 seconds') \
-#         .outputMode("append") \
-#         .format("parquet") \
-#         .option("path", hdfs_output_path+"/total_error_status") \
-#         .option("checkpointLocation", hdfs_checkpoint_path) \
-#         .start()
-
-# 5. Write the DataFrame as Parquet files to HDFS every 10 seconds
-query = df_parsed \
-    .writeStream \
-    .trigger(processingTime='10 seconds') \
-    .outputMode("append") \
-    .format("parquet") \
-    .option("path", hdfs_output_path) \
-    .option("checkpointLocation", hdfs_checkpoint_path) \
-    .start()
-
-query.awaitTermination()
+spark.streams.awaitAnyTermination()
